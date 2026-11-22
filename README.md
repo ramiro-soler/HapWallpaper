@@ -56,7 +56,7 @@ Task Manager's 3D percentage is relative to the GPU's current clock speed, so a 
 
 ## Prepare your video
 
-The hard part of HAP is making the file, so `prepare_video.ps1` does it in one step with [ffmpeg](https://ffmpeg.org/) (`winget install --id Gyan.FFmpeg -e` if you don't have it):
+The hard part of HAP is making the file, so `prepare_video.ps1` does it in one step with [ffmpeg](https://ffmpeg.org/). You need an ffmpeg with the HAP encoder (it requires libsnappy): Gyan's *full* build has it, but *essentials* builds, BtbN builds and many copies bundled with other apps don't. The script checks every ffmpeg on the PC and uses one that works; if none does, it offers to install the full build with `winget install --id Gyan.FFmpeg -e`. You can also point it at one with `-FFmpeg C:\path\to\ffmpeg.exe`.
 
 ```powershell
 .\prepare_video.ps1 -Video C:\videos\my_wallpaper.mp4
@@ -72,6 +72,7 @@ It detects your primary monitor's resolution, scales and crops the video to fill
 | `-ClockShadow` | Softly darkens the clock/tray corner so it reads better over a transparent taskbar |
 | `-Width 1920 -Height 1080` | Force a resolution (e.g. your largest monitor) |
 | `-Output C:\path` | Output folder (default: the script's folder) |
+| `-FFmpeg C:\path\ffmpeg.exe` | Use a specific ffmpeg instead of searching for one |
 
 Use videos you made or have permission to use. Seamless loops look best.
 

@@ -56,7 +56,7 @@ El porcentaje de 3D del Administrador de tareas se calcula sobre la velocidad ac
 
 ## Preparar el video
 
-Lo más complicado de HAP es armar el archivo, así que `prepare_video.ps1` lo hace en un paso con [ffmpeg](https://ffmpeg.org/) (si no lo tenés: `winget install --id Gyan.FFmpeg -e`):
+Lo más complicado de HAP es armar el archivo, así que `prepare_video.ps1` lo hace en un paso con [ffmpeg](https://ffmpeg.org/). Hace falta un ffmpeg con el codificador HAP (que necesita libsnappy): el build *full* de Gyan lo trae, pero los builds *essentials*, los de BtbN y muchos que vienen con otros programas no. El script revisa todos los ffmpeg que haya en la PC y usa uno que sirva; si no encuentra ninguno, ofrece instalar el full con `winget install --id Gyan.FFmpeg -e`. También podés indicarle uno con `-FFmpeg C:\ruta\ffmpeg.exe`.
 
 ```powershell
 .\prepare_video.ps1 -Video C:\videos\mi_wallpaper.mp4
@@ -72,6 +72,7 @@ Detecta la resolución del monitor principal, escala y recorta el video para lle
 | `-ClockShadow` | Oscurece suavemente la esquina del reloj y la bandeja para leerlos mejor con la barra transparente |
 | `-Width 1920 -Height 1080` | Forzar una resolución (por ejemplo, la de tu monitor más grande) |
 | `-Output C:\ruta` | Carpeta de salida (por defecto, la del script) |
+| `-FFmpeg C:\ruta\ffmpeg.exe` | Usar un ffmpeg concreto en vez de buscarlo |
 
 Usá videos propios o que tengas permiso de usar. Los que hacen bucle sin corte se ven mejor.
 

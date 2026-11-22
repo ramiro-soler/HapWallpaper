@@ -16,6 +16,8 @@
   .\prepare_video.ps1 -Video my_wallpaper.mp4 -Format both -Fps 30 -Start 5 -Duration 20
 .EXAMPLE
   .\prepare_video.ps1 -Video my_wallpaper.mp4 -ClockShadow
+.EXAMPLE
+  .\prepare_video.ps1 -Video my_wallpaper.mp4 -FFmpeg C:\tools\ffmpeg\bin\ffmpeg.exe
 #>
 param(
     [Parameter(Mandatory = $true)] [string] $Video,
@@ -27,21 +29,71 @@ param(
     [double] $Duration = 0,
     # softly darkens the bottom-right corner (clock and tray)
     [switch] $ClockShadow,
-    [string] $Output = $PSScriptRoot
+    [string] $Output = $PSScriptRoot,
+    # path to a specific ffmpeg.exe (otherwise every ffmpeg on the PC is tried)
+    [string] $FFmpeg = ''
 )
 $ErrorActionPreference = 'Stop'
-
-# --- ffmpeg
-$ffmpeg = (Get-Command ffmpeg -ErrorAction SilentlyContinue).Source
-if (-not $ffmpeg) {
-    Write-Host "ffmpeg was not found. Install it with:" -ForegroundColor Red
-    Write-Host "  winget install --id Gyan.FFmpeg -e"
-    exit 1
-}
-$encoders = & $ffmpeg -hide_banner -encoders 2>$null | Out-String
-if ($Format -ne 'av1' -and $encoders -notmatch '\bhap\b') { Write-Host "Your ffmpeg has no HAP encoder. Use the 'full' build (winget install Gyan.FFmpeg)." -ForegroundColor Red; exit 1 }
-if ($Format -ne 'hap' -and $encoders -notmatch 'libsvtav1') { Write-Host "Your ffmpeg has no libsvtav1 (AV1). Use the 'full' build (winget install Gyan.FFmpeg)." -ForegroundColor Red; exit 1 }
 if (-not (Test-Path $Video)) { Write-Host "Video not found: $Video" -ForegroundColor Red; exit 1 }
+
+# --- ffmpeg: many builds (Gyan "essentials", BtbN, ffmpeg bundled with other apps) have no HAP
+# encoder, and the first one on PATH is often one of those. So every ffmpeg found is checked and
+# the first one with the needed encoders is used.
+$needHap = $Format -ne 'av1'
+$needAv1 = $Format -ne 'hap'
+function Find-FFmpegCandidates {
+    $c = @()
+    if ($FFmpeg) { $c += $FFmpeg }
+    $c += @(Get-Command ffmpeg -All -CommandType Application -ErrorAction SilentlyContinue | ForEach-Object Source)
+    # winget installs (found even if this terminal was opened before the install updated PATH)
+    $roots = @("$env:LOCALAPPDATA\Microsoft\WinGet\Packages", "$env:ProgramFiles\WinGet\Packages", "$env:LOCALAPPDATA\Microsoft\WinGet\Links")
+    foreach ($r in $roots) {
+        if (Test-Path $r) { $c += @(Get-ChildItem $r -Recurse -Filter ffmpeg.exe -ErrorAction SilentlyContinue | ForEach-Object FullName) }
+    }
+    $c | Where-Object { $_ -and (Test-Path $_) } | ForEach-Object { (Resolve-Path $_).Path } | Select-Object -Unique
+}
+function Test-FFmpeg([string] $exe) {
+    $ErrorActionPreference = 'Continue' # a broken or non-ffmpeg exe must not stop the search
+    $enc = ''; $ver = '?'
+    try {
+        $enc = & $exe -hide_banner -encoders 2>$null | Out-String
+        $ver = [string](& $exe -hide_banner -version 2>$null | Select-Object -First 1) -replace '^ffmpeg version\s+', '' -replace '\s+Copyright.*$', ''
+    } catch { }
+    $missing = @()
+    if ($needHap -and $enc -notmatch '(?m)^\s*V\S*\s+hap\s') { $missing += 'HAP' }
+    if ($needAv1 -and $enc -notmatch '(?m)^\s*V\S*\s+libsvtav1\s') { $missing += 'libsvtav1 (AV1)' }
+    [pscustomobject]@{ Path = $exe; Version = $ver; Missing = $missing }
+}
+function Select-FFmpeg {
+    $tested = @(Find-FFmpegCandidates | ForEach-Object { Test-FFmpeg $_ })
+    [pscustomobject]@{ Good = ($tested | Where-Object { -not $_.Missing } | Select-Object -First 1); Tested = $tested }
+}
+
+$pick = Select-FFmpeg
+if (-not $pick.Good) {
+    if ($pick.Tested) {
+        Write-Host "Found ffmpeg, but none of them can do this:" -ForegroundColor Yellow
+        foreach ($t in $pick.Tested) { Write-Host ("  {0}`n    version {1} - missing: {2}" -f $t.Path, $t.Version, ($t.Missing -join ', ')) }
+        Write-Host "  (Usually an 'essentials' or minimal build. HAP needs a build with libsnappy, like Gyan's 'full' build.)"
+    } else {
+        Write-Host "ffmpeg was not found." -ForegroundColor Yellow
+    }
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        $ans = Read-Host "Install the 'full' ffmpeg build now with winget (Gyan.FFmpeg, ~200 MB)? [Y/n]"
+        if ($ans -notmatch '^(n|no)$') {
+            & winget install --id Gyan.FFmpeg -e --accept-source-agreements --accept-package-agreements
+            $pick = Select-FFmpeg
+        }
+    }
+    if (-not $pick.Good) {
+        Write-Host "No usable ffmpeg. Install the full build and run this again:" -ForegroundColor Red
+        Write-Host "  winget install --id Gyan.FFmpeg -e"
+        Write-Host "or download 'ffmpeg-release-full' from https://www.gyan.dev/ffmpeg/builds/ and pass it with -FFmpeg C:\path\to\ffmpeg.exe"
+        exit 1
+    }
+}
+$ffmpeg = $pick.Good.Path
+Write-Host "Using ffmpeg: $ffmpeg ($($pick.Good.Version))"
 $Video = (Resolve-Path $Video).Path
 
 # --- primary monitor resolution
@@ -53,7 +105,10 @@ if (-not $Width -or -not $Height) {
 if ($Format -ne 'av1' -and ($Width % 4 -or $Height % 4)) { Write-Host "Width and height must be multiples of 4 for HAP." -ForegroundColor Red; exit 1 }
 
 # --- source info
-$probe = & (Join-Path (Split-Path $ffmpeg) 'ffprobe.exe') -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate:format=duration -of default=nw=1 $Video
+$ffprobe = Join-Path (Split-Path $ffmpeg) 'ffprobe.exe'
+if (-not (Test-Path $ffprobe)) { $ffprobe = (Get-Command ffprobe -ErrorAction SilentlyContinue).Source }
+if (-not $ffprobe) { Write-Host "ffprobe.exe was not found next to $ffmpeg." -ForegroundColor Red; exit 1 }
+$probe = & $ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate:format=duration -of default=nw=1 $Video
 $info = @{}; $probe | ForEach-Object { $k, $v = $_ -split '=', 2; $info[$k] = $v }
 $total = [double]::Parse($info['duration'], [Globalization.CultureInfo]::InvariantCulture)
 $dur = if ($Duration -gt 0) { $Duration } else { $total - $Start }
