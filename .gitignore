@@ -13,3 +13,6 @@
 # Registros
 log.txt
 tb_log.txt
+
+# Configuracion local
+*.ini

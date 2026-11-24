@@ -50,7 +50,7 @@ Task Manager's 3D percentage is relative to the GPU's current clock speed, so a 
 
 - **Every monitor**, each with its own window and its own pause state. One HAP file fills any resolution and aspect ratio (scaled and center-cropped on the GPU).
 - **Automatic pause** with maximized or fullscreen windows, exclusive-fullscreen games, a locked session or the display off. It always shows a frame before pausing, so the taskbar never turns black.
-- **Transparent taskbar** (optional, see the note below).
+- **Transparent taskbar**, on by default; turn it off or on from the tray icon menu (see the note below).
 - **Fallback to regular video**: without a `.hap`, it plays `wallpaper.mp4` (H.264, AV1…) through Media Foundation with hardware decoding.
 - Tray icon (double-click pauses/resumes, with a warning if the `.hap` can't be used) and start with Windows.
 
@@ -93,21 +93,25 @@ ffmpeg -i video.mp4 -vf "scale=2560:1440:force_original_aspect_ratio=increase,cr
 Put `wallpaper.hap` (and/or `wallpaper.mp4`) next to `HapWallpaper.exe` and run it. If both exist, the `.hap` wins.
 
 ```
-HapWallpaper.exe [video.mp4 | wallpaper.hap] [--debug] [--nopause] [--notaskbar] [--noautostart]
+HapWallpaper.exe [video.mp4 | wallpaper.hap] [--debug] [--nopause] [--notaskbar] [--forcetaskbar] [--noautostart]
 ```
 
 | Option | Effect |
 |---|---|
 | `--debug` | Writes `log.txt` (and `tb_log.txt` for the taskbar DLL) next to the `.exe` |
 | `--nopause` | Never pauses for maximized/fullscreen windows |
-| `--notaskbar` | Leaves the taskbar alone (the DLL is not loaded) |
+| `--notaskbar` | Leaves the taskbar alone for this session (the DLL is not loaded) |
+| `--forcetaskbar` | Turns on the transparent taskbar even if another tool manages it (may break that tool) |
 | `--noautostart` | Doesn't register itself to start with Windows |
 
 To quit: right-click the tray icon → Exit.
 
 ### About the taskbar DLL
 
-The transparent taskbar works like [TranslucentTB](https://github.com/TranslucentTB/TranslucentTB): `HapWallpaperTB.dll` is loaded into Explorer through Windows' XAML diagnostics API and sets the taskbar background's opacity to 0. Because it runs inside Explorer, **some antivirus products may flag it**. It's optional: run with `--notaskbar` (or delete the DLL) and nothing is injected. The source is in `hapwallpaper_tb.cpp`.
+The transparent taskbar works like [TranslucentTB](https://github.com/TranslucentTB/TranslucentTB): `HapWallpaperTB.dll` is loaded into Explorer through Windows' XAML diagnostics API and sets the taskbar background's opacity to 0. Because it runs inside Explorer, **some antivirus products may flag it**. The source is in `hapwallpaper_tb.cpp`.
+
+- **Turn it off from the tray:** right-click the icon → *Transparent taskbar*. The choice is saved in `HapWallpaper.ini` next to the `.exe`, and when it's off nothing is injected (`--notaskbar` or deleting the DLL also work).
+- **Plays nice with other taskbar tools:** Windows only lets one program use that API inside Explorer. If you already use **TranslucentTB** or a **Windhawk** taskbar mod (like *Windows 11 Taskbar Styler*), HapWallpaper detects it and leaves the taskbar alone: manage it with that tool, which can make it transparent too. If you turn it on by hand from the menu, it tells you they're not compatible. The animated wallpaper works the same either way.
 
 ## Build
 

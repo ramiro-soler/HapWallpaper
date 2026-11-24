@@ -50,7 +50,7 @@ El porcentaje de 3D del Administrador de tareas se calcula sobre la velocidad ac
 
 - **Todos los monitores**, cada uno con su ventana y su propia pausa. Un mismo archivo HAP llena cualquier resolución y proporción (se escala y recorta al centro en la placa).
 - **Pausa automática** con ventanas maximizadas o a pantalla completa, juegos en pantalla completa exclusiva, sesión bloqueada o pantalla apagada. Antes de pausarse siempre muestra un cuadro, así la barra nunca queda en negro.
-- **Barra de tareas transparente** (opcional, ver la nota de abajo).
+- **Barra de tareas transparente**, prendida por defecto; se apaga o prende desde el menú del ícono de la bandeja (ver la nota de abajo).
 - **Respaldo con video común:** sin `.hap`, reproduce `wallpaper.mp4` (H.264, AV1…) con Media Foundation y decodificación por hardware.
 - Ícono en la bandeja (doble clic pausa/reanuda, y avisa si el `.hap` no se puede usar) y arranque con Windows.
 
@@ -81,21 +81,25 @@ Usá videos propios o que tengas permiso de usar. Los que hacen bucle sin corte 
 Dejá `wallpaper.hap` (y/o `wallpaper.mp4`) junto a `HapWallpaper.exe` y abrilo. Si están los dos, usa el `.hap`.
 
 ```
-HapWallpaper.exe [video.mp4 | wallpaper.hap] [--debug] [--nopause] [--notaskbar] [--noautostart]
+HapWallpaper.exe [video.mp4 | wallpaper.hap] [--debug] [--nopause] [--notaskbar] [--forcetaskbar] [--noautostart]
 ```
 
 | Opción | Efecto |
 |---|---|
 | `--debug` | Escribe `log.txt` (y `tb_log.txt` de la DLL de la barra) junto al `.exe` |
 | `--nopause` | No se pausa con ventanas maximizadas ni pantalla completa |
-| `--notaskbar` | No toca la barra de tareas (no se carga la DLL) |
+| `--notaskbar` | No toca la barra de tareas en esta sesión (no se carga la DLL) |
+| `--forcetaskbar` | Prende la barra transparente aunque haya otro programa manejándola (puede romperlo) |
 | `--noautostart` | No se anota en el inicio de Windows |
 
 Para cerrarlo: clic derecho en el ícono de la bandeja → Exit.
 
 ### Sobre la DLL de la barra
 
-La barra transparente funciona como [TranslucentTB](https://github.com/TranslucentTB/TranslucentTB): `HapWallpaperTB.dll` se carga en Explorer con la API de diagnóstico XAML de Windows y pone en 0 la opacidad del fondo de la barra. Como corre dentro de Explorer, **algún antivirus puede marcarla**. Es opcional: con `--notaskbar` (o borrando la DLL) no se inyecta nada. El código está en `hapwallpaper_tb.cpp`.
+La barra transparente funciona como [TranslucentTB](https://github.com/TranslucentTB/TranslucentTB): `HapWallpaperTB.dll` se carga en Explorer con la API de diagnóstico XAML de Windows y pone en 0 la opacidad del fondo de la barra. Como corre dentro de Explorer, **algún antivirus puede marcarla**. El código está en `hapwallpaper_tb.cpp`.
+
+- **Se apaga desde la bandeja:** clic derecho en el ícono → *Transparent taskbar*. La elección se guarda en `HapWallpaper.ini` junto al `.exe`, y apagada no se inyecta nada (también sirve `--notaskbar` o borrar la DLL).
+- **Convive con otros programas de barra:** Windows deja que un solo programa use esa API dentro de Explorer. Si ya tenés **TranslucentTB** o un mod de barra de **Windhawk** (como *Windows 11 Taskbar Styler*), HapWallpaper lo detecta y no toca la barra: la manejás con ese programa, que también puede dejarla transparente. Si la prendés a mano desde el menú, te avisa que no son compatibles. El fondo animado funciona igual en todos los casos.
 
 ## Compilar
 

@@ -6,7 +6,12 @@
 // frecuencia, y se pausa por monitor con ventanas maximizadas o a pantalla completa,
 // con la sesion bloqueada o con la pantalla apagada.
 //
-// Uso: HapWallpaper.exe [ruta_video|ruta.hap] [--debug] [--nopause] [--notaskbar] [--noautostart]
+// Uso: HapWallpaper.exe [ruta_video|ruta.hap] [--debug] [--nopause] [--notaskbar] [--forcetaskbar] [--noautostart]
+//   La barra transparente viene prendida y se puede apagar desde el menu de la bandeja
+//   (se guarda en HapWallpaper.ini).
+//   Si TranslucentTB o un mod de barra de Windhawk ya manejan la barra, no la toca
+//   (solo un programa puede usar el diagnostico XAML de Explorer); --forcetaskbar la
+//   activa ignorando eso, --notaskbar la apaga en esta sesion.
 //   Sin ruta usa "wallpaper.hap" junto al .exe si existe y si no "wallpaper.mp4"
 //   (tambien acepta los nombres anteriores fondo.hap / fondo.mp4).
 //   --debug escribe log.txt junto al .exe (y tb_log.txt la DLL de la barra).
@@ -28,6 +33,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <wtsapi32.h>
+#include <tlhelp32.h>
 #include <string>
 #include <vector>
 #include <cstdio>
@@ -48,6 +54,7 @@ DEFINE_GUID(FV_GUID_CONSOLE_DISPLAY_STATE, 0x6fe69556, 0x704a, 0x47a0, 0x8f, 0x2
 #define IDT_CHECK 1
 #define IDM_TOGGLE 100
 #define IDM_EXIT 101
+#define IDM_TASKBAR 102
 
 static HINSTANCE g_inst;
 static HWND g_msgWnd;
@@ -59,6 +66,7 @@ static std::wstring g_videoPath, g_exeDir;
 static bool g_debug, g_noAutostart, g_noAutoPause, g_userPaused, g_fullscreenApp, g_locked, g_displayOff;
 static UINT WM_TASKBARCREATED;
 static NOTIFYICONDATAW g_nid;
+static const wchar_t* g_tbOwner; // otro programa que maneja la barra (TranslucentTB, Windhawk)
 
 static void Log(const wchar_t* fmt, ...) {
     if (!g_debug) return;
@@ -643,6 +651,10 @@ static void UpdateTrayTip() {
     if (g_userPaused) swprintf(g_nid.szTip, 128, L"HapWallpaper - paused");
     else swprintf(g_nid.szTip, 128, L"HapWallpaper - playing on %u of %u monitors%ls", playing, (unsigned)g_screens.size(),
                   g_hapReady ? L" (HAP)" : L"");
+    if (g_tbOwner) {
+        size_t n = wcslen(g_nid.szTip);
+        swprintf(g_nid.szTip + n, 128 - n, L"\nTaskbar: managed by %ls", g_tbOwner);
+    }
     g_nid.uFlags = NIF_TIP;
     Shell_NotifyIconW(NIM_MODIFY, &g_nid);
 }
@@ -683,7 +695,11 @@ static void Check() {
 struct AccentPolicy { int State, Flags, Color, Anim; };
 struct WinCompAttrData { int Attr; void* Data; ULONG Size; };
 typedef BOOL (WINAPI *PFN_SWCA)(HWND, WinCompAttrData*);
-static bool g_taskbar = true;
+// La barra transparente se puede prender o apagar desde el menu de la bandeja (se guarda en
+// HapWallpaper.ini junto al .exe). Sin eleccion guardada viene prendida, salvo que otro
+// programa ya maneje la barra: ahi se queda apagada sin avisar. Apagada, no se toca Explorer.
+static bool g_taskbar = false;
+static bool g_taskbarAuto = true; // sin eleccion guardada en el .ini
 static HHOOK g_tbHook;
 static int g_hookTicks;
 static DWORD g_injectedPid;
@@ -703,10 +719,66 @@ static void ClearTaskbarWindow(HWND h) {
 }
 
 static void ApplyTaskbar() {
-    if (!g_taskbar) return;
+    if (!g_taskbar || g_tbOwner) return;
     if (HWND t = FindWindowW(L"Shell_TrayWnd", nullptr)) ClearTaskbarWindow(t);
     HWND s = nullptr;
     while ((s = FindWindowExW(nullptr, s, L"Shell_SecondaryTrayWnd", nullptr))) ClearTaskbarWindow(s);
+}
+
+// Otro programa que ya maneja la barra con la misma API de diagnostico XAML (solo
+// puede haber uno por Explorer). Si lo hay, HapWallpaper no toca la barra para no
+// romperlo, y avisa. Devuelve su nombre o nullptr.
+static bool g_forceTaskbar;
+
+static std::wstring Lower(std::wstring s) { for (auto& c : s) c = towlower(c); return s; }
+
+static bool ProcessRunning(const wchar_t* exe) {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe = { sizeof(pe) };
+    bool found = false;
+    for (BOOL ok = Process32FirstW(snap, &pe); ok && !found; ok = Process32NextW(snap, &pe))
+        found = !_wcsicmp(pe.szExeFile, exe);
+    CloseHandle(snap);
+    return found;
+}
+
+static bool WindhawkTaskbarModEnabled() {
+    // Windhawk guarda cada mod en HKLM\SOFTWARE\Windhawk\Engine\Mods\<id> (instalacion normal).
+    HKEY k;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Windhawk\\Engine\\Mods", 0, KEY_READ | KEY_WOW64_64KEY, &k) != ERROR_SUCCESS) return false;
+    bool found = false;
+    wchar_t name[256];
+    for (DWORD i = 0; !found; i++) {
+        DWORD len = 256;
+        if (RegEnumKeyExW(k, i, name, &len, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
+        std::wstring n = Lower(name);
+        if (n.find(L"taskbar-styler") == std::wstring::npos) continue;
+        DWORD disabled = 0, sz = sizeof(disabled);
+        RegGetValueW(k, name, L"Disabled", RRF_RT_REG_DWORD, nullptr, &disabled, &sz);
+        found = disabled == 0;
+    }
+    RegCloseKey(k);
+    return found;
+}
+
+static const wchar_t* OtherTaskbarTool(DWORD explorerPid) {
+    if (ProcessRunning(L"TranslucentTB.exe")) return L"TranslucentTB";
+    // Modulos ya cargados en Explorer: el TAP de TranslucentTB o un mod de barra de Windhawk.
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, explorerPid);
+    if (snap != INVALID_HANDLE_VALUE) {
+        MODULEENTRY32W me = { sizeof(me) };
+        const wchar_t* who = nullptr;
+        for (BOOL ok = Module32FirstW(snap, &me); ok && !who; ok = Module32NextW(snap, &me)) {
+            std::wstring path = Lower(me.szExePath), mod = Lower(me.szModule);
+            if (mod == L"explorertap.dll") who = L"TranslucentTB";
+            else if (path.find(L"windhawk") != std::wstring::npos && mod.find(L"taskbar") != std::wstring::npos) who = L"Windhawk (Taskbar Styler)";
+        }
+        CloseHandle(snap);
+        if (who) return who;
+    }
+    if (ProcessRunning(L"windhawk.exe") && WindhawkTaskbarModEnabled()) return L"Windhawk (Taskbar Styler)";
+    return nullptr;
 }
 
 static void InjectTaskbar() {
@@ -718,6 +790,24 @@ static void InjectTaskbar() {
     static DWORD lastPid;
     if (pid != lastPid) { lastPid = pid; g_injectTries = 0; } // Explorer se reinicio
     if (!pid || pid == g_injectedPid) return;
+
+    if (!g_forceTaskbar && !g_tbHook) {
+        const wchar_t* owner = OtherTaskbarTool(pid);
+        if (owner != g_tbOwner) {
+            if (owner && g_taskbarAuto) {
+                // Sin eleccion del usuario: no molestar, solo se ve en el tooltip.
+                Log(L"La barra la maneja %ls: barra transparente apagada (automatico)", owner);
+            } else if (owner) {
+                Log(L"La barra la maneja %ls: no se carga HapWallpaperTB.dll", owner);
+                std::wstring msg = std::wstring(L"Your taskbar is managed by ") + owner +
+                    L", so HapWallpaper's transparent taskbar stays off (only one tool can change it). Use " + owner + L" to make it transparent.";
+                Balloon(L"HapWallpaper", msg.c_str());
+            }
+            g_tbOwner = owner;
+            UpdateTrayTip();
+        }
+        if (owner) return;
+    }
 
     // Ya cargada en este Explorer (por ejemplo, si HapWallpaper se reinicio)?
     wchar_t evName[64];
@@ -750,6 +840,52 @@ static void InjectTaskbar() {
 
 static void CALLBACK ForegroundHook(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) { ApplyTaskbar(); }
 
+static std::wstring IniPath() { return g_exeDir + L"\\HapWallpaper.ini"; }
+// -1 = sin eleccion guardada (automatico), 0 = apagada, 1 = prendida.
+static int LoadTaskbarSetting() { return (int)GetPrivateProfileIntW(L"Settings", L"TransparentTaskbar", -1, IniPath().c_str()); }
+static void SaveTaskbarSetting(bool on) {
+    WritePrivateProfileStringW(L"Settings", L"TransparentTaskbar", on ? L"1" : L"0", IniPath().c_str());
+    g_taskbarAuto = false;
+}
+
+static void ResetTaskbarWindow(HWND h) {
+    static PFN_SWCA set = (PFN_SWCA)GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetWindowCompositionAttribute");
+    if (!set) return;
+    AccentPolicy ap = { 0 /* ACCENT_DISABLED: el estilo normal de Windows */, 0, 0, 0 };
+    WinCompAttrData d = { 19, &ap, sizeof(ap) };
+    set(h, &d);
+}
+
+// Opcion "Transparent taskbar" del menu de la bandeja.
+static void ToggleTaskbar() {
+    if (!g_taskbar || g_tbOwner) {
+        HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr);
+        DWORD pid = 0;
+        if (tray) GetWindowThreadProcessId(tray, &pid);
+        const wchar_t* owner = (!g_forceTaskbar && pid) ? OtherTaskbarTool(pid) : nullptr;
+        if (owner) {
+            std::wstring msg = std::wstring(L"The transparent taskbar isn't compatible with ") + owner +
+                L": only one program can change the taskbar this way, and it's already in use.\n\n"
+                L"Use " + owner + L" to make the taskbar transparent. The animated wallpaper works the same either way.";
+            MessageBoxW(g_msgWnd, msg.c_str(), L"HapWallpaper", MB_ICONINFORMATION);
+            return;
+        }
+        g_taskbar = true; g_tbOwner = nullptr; g_injectTries = 0;
+        SaveTaskbarSetting(true);
+        InjectTaskbar(); ApplyTaskbar();
+    } else {
+        g_taskbar = false;
+        SaveTaskbarSetting(false);
+        if (g_tbHook) { UnhookWindowsHookEx(g_tbHook); g_tbHook = nullptr; }
+        if (HWND t = FindWindowW(L"Shell_TrayWnd", nullptr)) ResetTaskbarWindow(t);
+        HWND s = nullptr;
+        while ((s = FindWindowExW(nullptr, s, L"Shell_SecondaryTrayWnd", nullptr))) ResetTaskbarWindow(s);
+        if (g_injectedPid)
+            Balloon(L"HapWallpaper", L"Transparent taskbar off. The taskbar fully returns to normal the next time you sign in or Explorer restarts.");
+    }
+    UpdateTrayTip();
+}
+
 // ------------------------------------------------------------- Bandeja / salida
 static void AddTray() {
     g_nid = {};
@@ -767,6 +903,7 @@ static void AddTray() {
 static void ShowMenu() {
     HMENU m = CreatePopupMenu();
     AppendMenuW(m, MF_STRING, IDM_TOGGLE, g_userPaused ? L"Resume" : L"Pause");
+    AppendMenuW(m, MF_STRING | (g_taskbar && !g_tbOwner ? MF_CHECKED : 0), IDM_TASKBAR, L"Transparent taskbar");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, IDM_EXIT, L"Exit");
     POINT p; GetCursorPos(&p);
@@ -792,6 +929,7 @@ static LRESULT CALLBACK MsgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_COMMAND:
         if (LOWORD(wp) == IDM_TOGGLE) { g_userPaused = !g_userPaused; ApplyState(); }
+        else if (LOWORD(wp) == IDM_TASKBAR) ToggleTaskbar();
         else if (LOWORD(wp) == IDM_EXIT) DestroyWindow(h);
         return 0;
     case WM_WTSSESSION_CHANGE:
@@ -850,12 +988,17 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     std::wstring defaultHap = g_exeDir + L"\\wallpaper.hap";
     if (!exists(defaultHap) && exists(g_exeDir + L"\\fondo.hap")) defaultHap = g_exeDir + L"\\fondo.hap";
     bool explicitPath = false;
+    int tbSetting = LoadTaskbarSetting();
+    g_taskbarAuto = tbSetting < 0;
+    g_taskbar = tbSetting != 0;
     int argc; wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     for (int i = 1; i < argc; i++) {
         if (!wcscmp(argv[i], L"--debug")) g_debug = true;
         else if (!wcscmp(argv[i], L"--nopause")) g_noAutoPause = true;
         else if (!wcscmp(argv[i], L"--notaskbar")) g_taskbar = false;
-        else if (!wcscmp(argv[i], L"--noautostart")) g_noAutostart = true;        else { g_videoPath = argv[i]; explicitPath = true; }
+        else if (!wcscmp(argv[i], L"--forcetaskbar")) { g_forceTaskbar = true; g_taskbar = true; }
+        else if (!wcscmp(argv[i], L"--noautostart")) g_noAutostart = true;
+        else { g_videoPath = argv[i]; explicitPath = true; }
     }
     LocalFree(argv);
     // La DLL de la barra solo escribe tb_log.txt si existe este evento.
@@ -907,8 +1050,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     Check();
     InjectTaskbar();
     ApplyTaskbar();
-    if (g_taskbar)
-        g_fgHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, ForegroundHook, 0, 0,
+    // El hook es barato y ApplyTaskbar no hace nada con la opcion apagada; asi sirve si se activa despues.
+    g_fgHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, ForegroundHook, 0, 0,
                                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
     SetTimer(g_msgWnd, IDT_CHECK, 1000, nullptr);
 
