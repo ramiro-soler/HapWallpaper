@@ -34,6 +34,18 @@ Medido en una RTX 3060, 2560×1440 a 200 Hz, video de 30 fps:
 
 La contra: un archivo HAP es grande (~1,8 MB por cuadro a 1440p, ~1 GB para 18 s a 30 fps) en disco, y se lee a ~55 MB/s mientras se reproduce (nada para un SSD; evitá ponerlo en un disco rígido). Si preferís un archivo chico, también reproduce cualquier MP4/AV1 que Windows sepa decodificar, con la misma presentación.
 
+### ¿Por qué los archivos HAP son tan grandes?
+
+H.264, HEVC y AV1 logran archivos chicos guardando sobre todo las *diferencias* entre cuadros, que después hay que decodificar de vuelta a imágenes completas mientras se reproduce. HAP no: cada cuadro se guarda entero, ya en el formato de textura comprimida que la placa de video lee de forma nativa (BC1, 4 bits por píxel). Justamente por eso no necesita decodificador de video, pero también hace que el tamaño dependa solo de la resolución, los cuadros por segundo y la duración, no de lo que muestre el video:
+
+| Resolución | Por cuadro | Por segundo a 30 fps | Bucle de 20 s |
+|---|---|---|---|
+| 1920×1080 | ~1 MB | ~30 MB | ~0,6 GB |
+| 2560×1440 | ~1,8 MB | ~53 MB | ~1,1 GB |
+| 3840×2160 | ~4 MB | ~119 MB | ~2,4 GB |
+
+Así que el costo real no está en la placa ni en el procesador, sino en **leer el archivo del disco** a ese ritmo mientras el fondo se reproduce (en pausa se detiene). Un SSD lo maneja sin problema, y no lo desgasta: los SSD se gastan con las *escrituras*, no con las lecturas. Para que el archivo ocupe menos sin romper el bucle, usá 30 fps (60 lo duplica) y la resolución de tu monitor (`prepare_video.ps1` hace las dos cosas por defecto), o `-Format av1` para un MP4 chico que usa el decodificador de video.
+
 ## Medido contra otro programa de fondos
 
 Misma PC (RTX 3060, Ryzen 7 5800X, Windows 11, un monitor 2560×1440 a 200 Hz), **mismo video a 2560×1440 y 30 fps**, escritorio a la vista, medido con los contadores de GPU de Windows y `nvidia-smi`:

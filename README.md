@@ -34,6 +34,18 @@ Measured on an RTX 3060, 2560×1440 @ 200 Hz, 30 fps video:
 
 The trade-off: a HAP file is large (~1.8 MB per frame at 1440p, ~1 GB for 18 s at 30 fps) on disk, and it is read at ~55 MB/s while playing (trivial for an SSD; avoid putting it on a hard drive). If you prefer a small file, HapWallpaper also plays any MP4/AV1 Windows can decode, with the same presentation.
 
+### Why are HAP files so large?
+
+H.264, HEVC and AV1 keep files small by storing mostly the *differences* between frames, which then have to be decoded back into full images while playing. HAP doesn't: every frame is stored complete, already in the compressed texture format the graphics card reads natively (BC1, 4 bits per pixel). That's exactly why it needs no video decoder, but it also means the size only depends on resolution, frame rate and length, not on what's in the video:
+
+| Resolution | Per frame | Per second at 30 fps | 20 s loop |
+|---|---|---|---|
+| 1920×1080 | ~1 MB | ~30 MB | ~0.6 GB |
+| 2560×1440 | ~1.8 MB | ~53 MB | ~1.1 GB |
+| 3840×2160 | ~4 MB | ~119 MB | ~2.4 GB |
+
+So the real cost isn't the GPU or CPU, it's **reading the file from disk** at that rate while the wallpaper plays (it stops when it's paused). An SSD handles it easily, and it doesn't wear it out: SSDs wear from *writes*, not reads. To keep the file smaller without breaking the loop, use 30 fps (60 doubles it) and the resolution of your monitor (`prepare_video.ps1` does both by default), or use `-Format av1` for a small MP4 that uses the video decoder instead.
+
 ## Measured against another wallpaper app
 
 Same PC (RTX 3060, Ryzen 7 5800X, Windows 11, one 2560×1440 monitor at 200 Hz), **same video at 2560×1440 and 30 fps**, desktop visible, measured with Windows' GPU counters and `nvidia-smi`:
