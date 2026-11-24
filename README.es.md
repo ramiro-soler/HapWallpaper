@@ -1,3 +1,5 @@
+<p align="center"><img src="icon/logo.png" width="128" alt=""></p>
+
 # HapWallpaper
 
 [English](README.md) · **Español**
@@ -106,7 +108,8 @@ La barra transparente funciona como [TranslucentTB](https://github.com/Transluce
 Con MSYS2 (UCRT64):
 
 ```powershell
-g++ -O2 -s -municode -mwindows -static -o HapWallpaper.exe hapwallpaper.cpp -ld3d11 -ldxgi -lmfplat -lmfuuid -ldwmapi -lshell32 -lwtsapi32 -lole32 -loleaut32 -luuid -luser32 -lgdi32
+windres icon/app.rc -O coff -o app_res.o
+g++ -O2 -s -municode -mwindows -static -o HapWallpaper.exe hapwallpaper.cpp app_res.o -ld3d11 -ldxgi -lmfplat -lmfuuid -ldwmapi -lshell32 -lwtsapi32 -lole32 -loleaut32 -luuid -luser32 -lgdi32
 g++ -O2 -s -shared -static -municode -o HapWallpaperTB.dll hapwallpaper_tb.cpp -lole32 -loleaut32 -luuid -luser32
 ```
 

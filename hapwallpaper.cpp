@@ -894,8 +894,12 @@ static void AddTray() {
     g_nid.uID = 1;
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAY;
-    g_nid.hIcon = LoadIconW(g_inst, MAKEINTRESOURCEW(1));
-    if (!g_nid.hIcon) g_nid.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    // Icono chico de la bandeja al tamano justo para la escala de pantalla (16 px a 100 %, 24 a 150 %...).
+    UINT dpi = GetDpiForSystem();
+    int sz = GetSystemMetricsForDpi(SM_CXSMICON, dpi);
+    static HICON trayIcon = nullptr;
+    if (!trayIcon) trayIcon = (HICON)LoadImageW(g_inst, MAKEINTRESOURCEW(1), IMAGE_ICON, sz, sz, LR_DEFAULTCOLOR);
+    g_nid.hIcon = trayIcon ? trayIcon : LoadIconW(nullptr, IDI_APPLICATION);
     wcscpy(g_nid.szTip, L"HapWallpaper");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 }
