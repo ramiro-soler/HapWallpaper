@@ -34,6 +34,7 @@
 #include <shlobj.h>
 #include <wtsapi32.h>
 #include <tlhelp32.h>
+#include <restartmanager.h>
 #include <string>
 #include <vector>
 #include <cstdio>
@@ -501,7 +502,14 @@ static bool StartRender(Screen* s) {
     }
     s->runEvent = CreateEventW(nullptr, TRUE, ShouldPause(s) ? FALSE : TRUE, nullptr);
     s->stop = 0;
-    s->thread = CreateThread(nullptr, 0, RenderThread, s, 0, nullptr);
+    s->thread = s->runEvent ? CreateThread(nullptr, 0, RenderThread, s, 0, nullptr) : nullptr;
+    if (!s->thread) {
+        Log(L"No se pudo crear el hilo de render: %lu", GetLastError());
+        if (s->runEvent) { CloseHandle(s->runEvent); s->runEvent = nullptr; }
+        if (s->frameWait) { CloseHandle(s->frameWait); s->frameWait = nullptr; }
+        s->swap->Release(); s->swap = nullptr;
+        return false;
+    }
     SetThreadPriority(s->thread, THREAD_PRIORITY_ABOVE_NORMAL);
     return true;
 }
@@ -510,8 +518,17 @@ static void DestroyScreen(Screen* s) {
     if (s->thread) {
         InterlockedExchange(&s->stop, 1);
         SetEvent(s->runEvent);
-        WaitForSingleObject(s->thread, 2000);
+        // El hilo sale en menos de ~100 ms (todas sus esperas tienen tiempo limite o las
+        // despierta runEvent). Si aun asi sigue vivo (por ejemplo, una lectura de disco
+        // trabada), no se libera nada de lo que usa: se pierde algo de memoria, pero no
+        // hay accesos a memoria ya liberada.
+        DWORD w = WaitForSingleObject(s->thread, 5000);
         CloseHandle(s->thread);
+        if (w != WAIT_OBJECT_0) {
+            Log(L"El hilo de render no termino; se dejan sus recursos sin liberar");
+            if (s->wnd && IsWindow(s->wnd)) ShowWindow(s->wnd, SW_HIDE);
+            return;
+        }
     }
     if (s->runEvent) CloseHandle(s->runEvent);
     if (s->frameWait) CloseHandle(s->frameWait);
@@ -856,6 +873,42 @@ static void ResetTaskbarWindow(HWND h) {
     set(h, &d);
 }
 
+// Reinicia Explorer con el Restart Manager (como los instaladores): lo cierra en orden y lo
+// vuelve a abrir. Asi se descarga la DLL de la barra. Corre en otro hilo porque RmShutdown
+// espera a que Explorer cierre; al volver, WM_TASKBARCREATED rearma el icono y el fondo.
+static DWORD WINAPI RestartExplorerThread(LPVOID) {
+    HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr);
+    DWORD pid = 0;
+    if (tray) GetWindowThreadProcessId(tray, &pid);
+    if (!pid) return 0;
+    RM_UNIQUE_PROCESS p = { pid, {} };
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+    FILETIME e, k, u;
+    bool ok = h && GetProcessTimes(h, &p.ProcessStartTime, &e, &k, &u);
+    DWORD sess; WCHAR key[CCH_RM_SESSION_KEY + 1] = {};
+    if (ok && RmStartSession(&sess, 0, key) == ERROR_SUCCESS) {
+        DWORD r = RmRegisterResources(sess, 0, nullptr, 1, &p, 0, nullptr);
+        if (r == ERROR_SUCCESS) r = RmShutdown(sess, RmForceShutdown, nullptr);
+        Log(L"Explorer cerrandose: %lu", r);
+        // Explorer puede tardar varios segundos en cerrar del todo: esperarlo antes de
+        // reabrirlo (si no, el nuevo explorer.exe abre una ventana de carpeta en el viejo).
+        DWORD w = h ? WaitForSingleObject(h, 20000) : WAIT_FAILED;
+        if (r == ERROR_SUCCESS) r = RmRestart(sess, 0, nullptr);
+        Log(L"Explorer reiniciado: espera %lu, RmRestart %lu", w, r);
+        RmEndSession(sess);
+    }
+    if (h) CloseHandle(h);
+    // Si Explorer no volvio solo (y no quedo ninguno abierto), abrirlo.
+    for (int i = 0; i < 100 && !FindWindowW(L"Shell_TrayWnd", nullptr); i++) Sleep(100);
+    if (!FindWindowW(L"Shell_TrayWnd", nullptr) && !ProcessRunning(L"explorer.exe")) {
+        Log(L"Explorer no volvio solo: se abre");
+        wchar_t exe[MAX_PATH];
+        GetWindowsDirectoryW(exe, MAX_PATH); wcscat(exe, L"\\explorer.exe");
+        ShellExecuteW(nullptr, nullptr, exe, nullptr, nullptr, SW_SHOWNORMAL);
+    }
+    return 0;
+}
+
 // Opcion "Transparent taskbar" del menu de la bandeja.
 static void ToggleTaskbar() {
     if (!g_taskbar || g_tbOwner) {
@@ -880,8 +933,15 @@ static void ToggleTaskbar() {
         if (HWND t = FindWindowW(L"Shell_TrayWnd", nullptr)) ResetTaskbarWindow(t);
         HWND s = nullptr;
         while ((s = FindWindowExW(nullptr, s, L"Shell_SecondaryTrayWnd", nullptr))) ResetTaskbarWindow(s);
-        if (g_injectedPid)
-            Balloon(L"HapWallpaper", L"Transparent taskbar off. The taskbar fully returns to normal the next time you sign in or Explorer restarts.");
+        // La DLL sigue cargada en Explorer y el fondo de la barra sigue oculto hasta que
+        // Explorer se reinicie: ofrecer hacerlo ahora.
+        if (g_injectedPid &&
+            MessageBoxW(g_msgWnd, L"Transparent taskbar off.\n\nThe taskbar fully returns to normal after Explorer restarts. "
+                L"Restart Explorer now?\n\nThe taskbar flickers for a moment, open File Explorer windows may close, "
+                L"and a file copy in progress would be interrupted.",
+                L"HapWallpaper", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+            if (HANDLE t = CreateThread(nullptr, 0, RestartExplorerThread, nullptr, 0, nullptr)) CloseHandle(t);
+        }
     }
     UpdateTrayTip();
 }

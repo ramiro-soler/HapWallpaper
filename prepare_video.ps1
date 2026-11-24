@@ -22,11 +22,13 @@
 param(
     [Parameter(Mandatory = $true)] [string] $Video,
     [ValidateSet('hap', 'av1', 'both')] [string] $Format = 'hap',
-    [int] $Fps = 30,
-    [int] $Width = 0,
-    [int] $Height = 0,
-    [double] $Start = 0,
-    [double] $Duration = 0,
+    [ValidateRange(1, 240)] [int] $Fps = 30,
+    # 0 = primary monitor resolution
+    [ValidateRange(0, 16384)] [int] $Width = 0,
+    [ValidateRange(0, 16384)] [int] $Height = 0,
+    [ValidateRange(0, 86400)] [double] $Start = 0,
+    # 0 = until the end of the video
+    [ValidateRange(0, 86400)] [double] $Duration = 0,
     # softly darkens the bottom-right corner (clock and tray)
     [switch] $ClockShadow,
     [string] $Output = $PSScriptRoot,
@@ -113,6 +115,7 @@ $info = @{}; $probe | ForEach-Object { $k, $v = $_ -split '=', 2; $info[$k] = $v
 $total = [double]::Parse($info['duration'], [Globalization.CultureInfo]::InvariantCulture)
 $dur = if ($Duration -gt 0) { $Duration } else { $total - $Start }
 $frameCount = [math]::Floor($dur * $Fps)
+if ($frameCount -lt 1) { Write-Host ("Nothing to encode: the video is {0:N1} s long and -Start is {1} s." -f $total, $Start) -ForegroundColor Red; exit 1 }
 Write-Host ("Source: {0}x{1}, {2:N1} s  ->  screen {3}x{4}, {5} fps, {6} frames" -f $info['width'], $info['height'], $total, $Width, $Height, $Fps, $frameCount)
 New-Item -ItemType Directory -Force $Output | Out-Null
 if ($Format -ne 'av1') {
@@ -143,7 +146,15 @@ if ($Format -ne 'av1') {
     if ($LASTEXITCODE) { Write-Host "ffmpeg failed." -ForegroundColor Red; exit 1 }
     $stride = $Width * $Height / 2 + 8
     $len = (Get-Item $out).Length
-    if ($len % $stride) { Write-Host "Warning: the HAP frames don't have a fixed size; HapWallpaper will fall back to the MP4." -ForegroundColor Yellow }
+    if ($len % $stride) {
+        # Without fixed-size frames the player can't use the file: don't leave it behind.
+        Remove-Item $out -Force
+        if ($Format -eq 'hap') {
+            Write-Host "This ffmpeg wrote HAP frames of varying size, which HapWallpaper can't play. Try another ffmpeg build (-FFmpeg) or use -Format av1." -ForegroundColor Red
+            exit 1
+        }
+        Write-Host "This ffmpeg wrote HAP frames of varying size, which HapWallpaper can't play; deleted wallpaper.hap. Writing only the MP4." -ForegroundColor Yellow
+    }
     else {
         # 32-byte trailer so the player knows the format:
         # "HAPWALL1" + width, height, fps numerator, fps denominator, frames, bytes per frame.

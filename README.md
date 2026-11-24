@@ -19,7 +19,7 @@ HapWallpaper brings that path to the **Windows desktop**, instead of relying on 
 | Decoding | GPU video decoder (NVDEC, VCN, Quick Sync) or CPU | **None**: the frame is copied as-is into a BC1 texture |
 | Color conversion | YUV → RGB every frame | Not needed: BC1 is already RGB |
 | High-refresh G-Sync / FreeSync monitors | A 30/60 fps video drags the panel down to 30/60 Hz | Presents on every refresh; when the frame didn't change it re-presents the same buffer (`DXGI_PRESENT_DO_NOT_SEQUENCE`) without drawing or copying anything, so the monitor stays at its maximum rate |
-| Maximized or fullscreen windows | Varies | Pauses **per monitor** instantly; the last frame stays visible behind a transparent taskbar |
+| Maximized or fullscreen windows | Varies | Pauses **per monitor** (instantly when you switch windows, within a second otherwise; an exclusive-fullscreen game pauses all of them); the last frame stays visible behind a transparent taskbar |
 | Paused | Varies | 0 % GPU |
 
 Measured on an RTX 3060, 2560×1440 @ 200 Hz, 30 fps video:
@@ -124,8 +124,9 @@ To quit: right-click the tray icon → Exit.
 
 The transparent taskbar works like [TranslucentTB](https://github.com/TranslucentTB/TranslucentTB): `HapWallpaperTB.dll` is loaded into Explorer through Windows' XAML diagnostics API and sets the taskbar background's opacity to 0. Because it runs inside Explorer, **some antivirus products may flag it**. The source is in `hapwallpaper_tb.cpp`.
 
-- **Turn it off from the tray:** right-click the icon → *Transparent taskbar*. The choice is saved in `HapWallpaper.ini` next to the `.exe`, and when it's off nothing is injected (`--notaskbar` or deleting the DLL also work).
+- **Turn it off from the tray:** right-click the icon → *Transparent taskbar*. The choice is saved in `HapWallpaper.ini` next to the `.exe`, and when it's off nothing is injected (`--notaskbar` or deleting the DLL also work). If the DLL was already loaded, it stays in Explorer until Explorer restarts, so turning it off offers to restart Explorer right away; otherwise the taskbar fully returns to normal the next time you sign in.
 - **Plays nice with other taskbar tools:** Windows only lets one program use that API inside Explorer. If you already use **TranslucentTB** or a **Windhawk** taskbar mod (like *Windows 11 Taskbar Styler*), HapWallpaper detects it and leaves the taskbar alone: manage it with that tool, which can make it transparent too. If you turn it on by hand from the menu, it tells you they're not compatible. The animated wallpaper works the same either way.
+- **May break with a Windows update:** the XAML diagnostics API is public, but the taskbar's internal layout (the `BackgroundFill` and `BackgroundStroke` elements it hides) isn't, and Microsoft can change it at any time. TranslucentTB and the Windhawk mods depend on it the same way. If that happens, the taskbar just stops turning transparent; the animated wallpaper keeps working.
 
 ## Build
 
@@ -133,7 +134,7 @@ With MSYS2 (UCRT64):
 
 ```powershell
 windres icon/app.rc -O coff -o app_res.o
-g++ -O2 -s -municode -mwindows -static -o HapWallpaper.exe hapwallpaper.cpp app_res.o -ld3d11 -ldxgi -lmfplat -lmfuuid -ldwmapi -lshell32 -lwtsapi32 -lole32 -loleaut32 -luuid -luser32 -lgdi32
+g++ -O2 -s -municode -mwindows -static -o HapWallpaper.exe hapwallpaper.cpp app_res.o -ld3d11 -ldxgi -lmfplat -lmfuuid -ldwmapi -lshell32 -lwtsapi32 -lrstrtmgr -lole32 -loleaut32 -luuid -luser32 -lgdi32
 g++ -O2 -s -shared -static -municode -o HapWallpaperTB.dll hapwallpaper_tb.cpp -lole32 -loleaut32 -luuid -luser32
 ```
 

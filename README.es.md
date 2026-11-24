@@ -19,7 +19,7 @@ HapWallpaper lleva esa ruta al **escritorio de Windows**, en lugar de depender d
 | Decodificación | Decodificador de video de la placa (NVDEC, VCN, Quick Sync) o CPU | **Ninguna**: el cuadro se copia tal cual a una textura BC1 |
 | Conversión de color | YUV → RGB en cada cuadro | No hace falta: BC1 ya es RGB |
 | Monitores G-Sync/FreeSync de alta frecuencia | Un video de 30/60 fps baja la pantalla a 30/60 Hz | Presenta en cada refresco; si el cuadro no cambió vuelve a presentar el mismo buffer (`DXGI_PRESENT_DO_NOT_SEQUENCE`) sin dibujar ni copiar nada, así el monitor sigue a su frecuencia máxima |
-| Ventanas maximizadas o a pantalla completa | Varía | Se pausa **por monitor** al instante; detrás de la barra transparente queda el último cuadro |
+| Ventanas maximizadas o a pantalla completa | Varía | Se pausa **por monitor** (al instante cuando cambiás de ventana, si no en menos de un segundo; un juego en pantalla completa exclusiva pausa todos); detrás de la barra transparente queda el último cuadro |
 | En pausa | Varía | 0 % de GPU |
 
 Medido en una RTX 3060, 2560×1440 a 200 Hz, video de 30 fps:
@@ -112,8 +112,9 @@ Para cerrarlo: clic derecho en el ícono de la bandeja → Exit.
 
 La barra transparente funciona como [TranslucentTB](https://github.com/TranslucentTB/TranslucentTB): `HapWallpaperTB.dll` se carga en Explorer con la API de diagnóstico XAML de Windows y pone en 0 la opacidad del fondo de la barra. Como corre dentro de Explorer, **algún antivirus puede marcarla**. El código está en `hapwallpaper_tb.cpp`.
 
-- **Se apaga desde la bandeja:** clic derecho en el ícono → *Transparent taskbar*. La elección se guarda en `HapWallpaper.ini` junto al `.exe`, y apagada no se inyecta nada (también sirve `--notaskbar` o borrar la DLL).
+- **Se apaga desde la bandeja:** clic derecho en el ícono → *Transparent taskbar*. La elección se guarda en `HapWallpaper.ini` junto al `.exe`, y apagada no se inyecta nada (también sirve `--notaskbar` o borrar la DLL). Si la DLL ya estaba cargada, queda en Explorer hasta que Explorer se reinicie, así que al apagarla ofrece reiniciarlo en el momento; si no, la barra vuelve del todo a la normalidad la próxima vez que inicies sesión.
 - **Convive con otros programas de barra:** Windows deja que un solo programa use esa API dentro de Explorer. Si ya tenés **TranslucentTB** o un mod de barra de **Windhawk** (como *Windows 11 Taskbar Styler*), HapWallpaper lo detecta y no toca la barra: la manejás con ese programa, que también puede dejarla transparente. Si la prendés a mano desde el menú, te avisa que no son compatibles. El fondo animado funciona igual en todos los casos.
+- **Puede romperse con una actualización de Windows:** la API de diagnóstico XAML es pública, pero la estructura interna de la barra (los elementos `BackgroundFill` y `BackgroundStroke` que oculta) no, y Microsoft puede cambiarla en cualquier momento. TranslucentTB y los mods de Windhawk dependen de lo mismo. Si pasa, la barra simplemente deja de ponerse transparente; el fondo animado sigue funcionando.
 
 ## Compilar
 
@@ -121,7 +122,7 @@ Con MSYS2 (UCRT64):
 
 ```powershell
 windres icon/app.rc -O coff -o app_res.o
-g++ -O2 -s -municode -mwindows -static -o HapWallpaper.exe hapwallpaper.cpp app_res.o -ld3d11 -ldxgi -lmfplat -lmfuuid -ldwmapi -lshell32 -lwtsapi32 -lole32 -loleaut32 -luuid -luser32 -lgdi32
+g++ -O2 -s -municode -mwindows -static -o HapWallpaper.exe hapwallpaper.cpp app_res.o -ld3d11 -ldxgi -lmfplat -lmfuuid -ldwmapi -lshell32 -lwtsapi32 -lrstrtmgr -lole32 -loleaut32 -luuid -luser32 -lgdi32
 g++ -O2 -s -shared -static -municode -o HapWallpaperTB.dll hapwallpaper_tb.cpp -lole32 -loleaut32 -luuid -luser32
 ```
 
