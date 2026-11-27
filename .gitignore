@@ -16,3 +16,7 @@ tb_log.txt
 
 # Configuracion local
 *.ini
+
+# Fondo estatico generado (primer cuadro) y copia del fondo original
+HapWallpaper_frame.bmp
+HapWallpaper_original*.jpg

@@ -63,8 +63,9 @@ El porcentaje de 3D del Administrador de tareas se calcula sobre la velocidad ac
 ## Funciones
 
 - **Todos los monitores**, cada uno con su ventana y su propia pausa. Un mismo archivo HAP llena cualquier resolución y proporción (se escala y recorta al centro en la placa).
-- **Pausa automática** con ventanas maximizadas o a pantalla completa, juegos en pantalla completa exclusiva, sesión bloqueada o pantalla apagada. Antes de pausarse siempre muestra un cuadro, así la barra nunca queda en negro.
+- **Pausa automática** con ventanas maximizadas o a pantalla completa, juegos en pantalla completa exclusiva, sesión bloqueada o pantalla apagada. Antes de pausarse siempre muestra un cuadro, así la barra nunca queda en negro. Si preferís que se reproduzca siempre, destildá *Pause behind maximized or fullscreen windows* en el menú de la bandeja (se guarda en `HapWallpaper.ini`; con la sesión bloqueada o la pantalla apagada se pausa igual).
 - **Barra de tareas transparente**, prendida por defecto; se apaga o prende desde el menú del ícono de la bandeja (ver la nota de abajo).
+- **Cambio de escritorio virtual sin saltos**: al cambiar de escritorio, Windows rehace la capa del fondo y muestra un momento su fondo estático hasta que el video se vuelve a enganchar. Con un `.hap`, HapWallpaper pone el primer cuadro del video como fondo de Windows (el video recomienza desde ese cuadro), así el cambio casi no se nota. Tu fondo original se guarda en `HapWallpaper.ini` y se restaura al salir desde la bandeja o al apagar la opción (menú de la bandeja → *Use first video frame as Windows wallpaper*, prendida por defecto). Si usás una presentación de fondos, no se toca.
 - **Respaldo con video común:** sin `.hap`, reproduce `wallpaper.mp4` (H.264, AV1…) con Media Foundation y decodificación por hardware.
 - Ícono en la bandeja (doble clic pausa/reanuda, y avisa si el `.hap` no se puede usar) y arranque con Windows.
 
@@ -101,7 +102,7 @@ HapWallpaper.exe [video.mp4 | wallpaper.hap] [--debug] [--nopause] [--notaskbar]
 | Opción | Efecto |
 |---|---|
 | `--debug` | Escribe `log.txt` (y `tb_log.txt` de la DLL de la barra) junto al `.exe` |
-| `--nopause` | No se pausa con ventanas maximizadas ni pantalla completa |
+| `--nopause` | No se pausa con ventanas maximizadas ni pantalla completa en esta sesión (igual que destildarlo en el menú de la bandeja) |
 | `--notaskbar` | No toca la barra de tareas en esta sesión (no se carga la DLL) |
 | `--forcetaskbar` | Prende la barra transparente aunque haya otro programa manejándola (puede romperlo) |
 | `--noautostart` | No se anota en el inicio de Windows |

@@ -63,8 +63,9 @@ Task Manager's 3D percentage is relative to the GPU's current clock speed, so a 
 ## Features
 
 - **Every monitor**, each with its own window and its own pause state. One HAP file fills any resolution and aspect ratio (scaled and center-cropped on the GPU).
-- **Automatic pause** with maximized or fullscreen windows, exclusive-fullscreen games, a locked session or the display off. It always shows a frame before pausing, so the taskbar never turns black.
+- **Automatic pause** with maximized or fullscreen windows, exclusive-fullscreen games, a locked session or the display off. It always shows a frame before pausing, so the taskbar never turns black. If you'd rather it always play, untick *Pause behind maximized or fullscreen windows* in the tray menu (saved in `HapWallpaper.ini`; locked session and display off still pause).
 - **Transparent taskbar**, on by default; turn it off or on from the tray icon menu (see the note below).
+- **Seamless virtual desktop switching**: when you switch desktops, Windows rebuilds the wallpaper layer and briefly shows its own static wallpaper until the video reattaches. With a `.hap`, HapWallpaper sets the video's first frame as the Windows wallpaper (the video restarts from that frame), so the switch is barely noticeable. Your original wallpaper is saved in `HapWallpaper.ini` and restored when you quit from the tray, or when you turn the option off (tray menu → *Use first video frame as Windows wallpaper*, on by default). It's skipped if you use a wallpaper slideshow.
 - **Fallback to regular video**: without a `.hap`, it plays `wallpaper.mp4` (H.264, AV1…) through Media Foundation with hardware decoding.
 - Tray icon (double-click pauses/resumes, with a warning if the `.hap` can't be used) and start with Windows.
 
@@ -113,7 +114,7 @@ HapWallpaper.exe [video.mp4 | wallpaper.hap] [--debug] [--nopause] [--notaskbar]
 | Option | Effect |
 |---|---|
 | `--debug` | Writes `log.txt` (and `tb_log.txt` for the taskbar DLL) next to the `.exe` |
-| `--nopause` | Never pauses for maximized/fullscreen windows |
+| `--nopause` | Never pauses for maximized/fullscreen windows this session (same as unticking it in the tray menu) |
 | `--notaskbar` | Leaves the taskbar alone for this session (the DLL is not loaded) |
 | `--forcetaskbar` | Turns on the transparent taskbar even if another tool manages it (may break that tool) |
 | `--noautostart` | Doesn't register itself to start with Windows |

@@ -53,9 +53,12 @@ DEFINE_GUID(FV_GUID_CONSOLE_DISPLAY_STATE, 0x6fe69556, 0x704a, 0x47a0, 0x8f, 0x2
 
 #define WM_TRAY (WM_APP + 1)
 #define IDT_CHECK 1
+#define IDT_QUICK 2
 #define IDM_TOGGLE 100
 #define IDM_EXIT 101
 #define IDM_TASKBAR 102
+#define IDM_STATICFRAME 103
+#define IDM_AUTOPAUSE 104
 
 static HINSTANCE g_inst;
 static HWND g_msgWnd;
@@ -104,6 +107,7 @@ struct Screen {
     HANDLE frameWait = nullptr, runEvent = nullptr, thread = nullptr;
     volatile LONG stop = 0;
     volatile bool shown = false;            // ya mostro al menos un cuadro
+    volatile bool failed = false;           // Present falla seguido: hay que rehacer todo
     bool autoPaused = false;
     ID3D11Texture2D* hapTex = nullptr;      // modo HAP: cuadro BC1 de este monitor
     ID3D11ShaderResourceView* hapSrv = nullptr;
@@ -156,7 +160,7 @@ static void InitD3D(bool video) {
     if (SUCCEEDED(g_d3d->QueryInterface(FV_IID_ID3D10Multithread, (void**)&mt))) { mt->SetMultithreadProtected(TRUE); mt->Release(); }
     if (video) {
         EnsureMF();
-        if (SUCCEEDED(MFCreateDXGIDeviceManager(&g_resetToken, &g_dxgiMgr)))
+        if (g_dxgiMgr || SUCCEEDED(MFCreateDXGIDeviceManager(&g_resetToken, &g_dxgiMgr)))
             g_dxgiMgr->ResetDevice(g_d3d, g_resetToken);
     }
 }
@@ -287,6 +291,20 @@ static bool InitHap() {
     return true;
 }
 
+// Si se perdio el dispositivo (driver reiniciado, placa reseteada), se descarta junto con
+// todo lo creado con el para que InitD3D/InitHap lo vuelvan a crear. Sin hilos de render.
+static void ReleaseLostDevice() {
+    if (!g_d3d) return;
+    HRESULT why = g_d3d->GetDeviceRemovedReason();
+    if (why == S_OK) return;
+    Log(L"Dispositivo D3D perdido (0x%08X); se vuelve a crear", (unsigned)why);
+    if (g_vs) { g_vs->Release(); g_vs = nullptr; }
+    if (g_ps) { g_ps->Release(); g_ps = nullptr; }
+    if (g_sampler) { g_sampler->Release(); g_sampler = nullptr; }
+    g_hapReady = false;
+    g_d3d->Release(); g_d3d = nullptr;
+}
+
 static bool CreateHapResources(Screen* s, UINT sw, UINT sh) {
     D3D11_TEXTURE2D_DESC td = {};
     td.Width = g_hapW; td.Height = g_hapH; td.MipLevels = 1; td.ArraySize = 1;
@@ -313,6 +331,7 @@ static DWORD WINAPI RenderThread(LPVOID param) {
     g_d3d->GetImmediateContext(&ctx);
     bool hap = g_hapReady && s->hapTex;
     bool waitNext = false, haveFrame = false;
+    UINT presentFails = 0;
     UINT64 frameVer = 0, bufVer[4] = { ~0ull, ~0ull, ~0ull, ~0ull };
     IDXGISwapChain3* sc3 = nullptr;
     s->swap->QueryInterface(__uuidof(IDXGISwapChain3), (void**)&sc3);
@@ -466,8 +485,13 @@ static DWORD WINAPI RenderThread(LPVOID param) {
         // el cuadro entero en cada refresco: 10 % de 3D contra ~2 %.)
         DXGI_PRESENT_PARAMETERS pp = {};
         UINT flags = (!drawn && sc3) ? DXGI_PRESENT_DO_NOT_SEQUENCE : 0;
-        if (SUCCEEDED(s->swap->Present1(1, flags, &pp))) { waitNext = true; s->shown = true; }
-        else Sleep(5);
+        HRESULT phr = s->swap->Present1(1, flags, &pp);
+        if (SUCCEEDED(phr)) { waitNext = true; s->shown = true; presentFails = 0; }
+        else {
+            // Falla seguido (dispositivo perdido, ventana rota): Check() rehace el monitor.
+            if (++presentFails == 200) { Log(L"Present falla: 0x%08X", (unsigned)phr); s->failed = true; }
+            Sleep(5);
+        }
     }
     releaseHap();
     if (sc3) sc3->Release();
@@ -553,6 +577,20 @@ static BOOL CALLBACK FindWorkerProc(HWND top, LPARAM lp) {
     return TRUE;
 }
 
+// La capa WorkerW visible del fondo, sin pedirle nada a Explorer. Solo se aceptan capas
+// visibles: Explorer tiene ademas varias WorkerW ocultas que no sirven.
+static HWND CurrentWorkerW() {
+    HWND progman = FindWindowW(L"Progman", nullptr);
+    if (!progman) return nullptr;
+    // Win11 24H2+: la capa es hija de Progman.
+    for (HWND w = nullptr; (w = FindWindowExW(progman, w, L"WorkerW", nullptr)); )
+        if (IsWindowVisible(w)) return w;
+    // Versiones anteriores: WorkerW de primer nivel detras de la ventana con los iconos.
+    HWND worker = nullptr;
+    EnumWindows(FindWorkerProc, (LPARAM)&worker);
+    return worker && IsWindowVisible(worker) ? worker : nullptr;
+}
+
 static HWND FindWorkerW() {
     HWND progman = FindWindowW(L"Progman", nullptr);
     if (!progman) return nullptr;
@@ -560,10 +598,7 @@ static HWND FindWorkerW() {
     // Pide a Explorer que cree la capa WorkerW detras de los iconos.
     SendMessageTimeoutW(progman, 0x052C, 0xD, 0x1, SMTO_NORMAL, 1000, &r);
     SendMessageTimeoutW(progman, 0x052C, 0, 0, SMTO_NORMAL, 1000, &r);
-    HWND worker = nullptr;
-    EnumWindows(FindWorkerProc, (LPARAM)&worker);
-    if (!worker) worker = FindWindowExW(progman, nullptr, L"WorkerW", nullptr); // Win11 24H2+
-    return worker;
+    return CurrentWorkerW();
 }
 
 static bool g_hapWarned;
@@ -606,8 +641,12 @@ static BOOL CALLBACK EnumMonProc(HMONITOR mon, HDC, LPRECT, LPARAM lp) {
     return TRUE;
 }
 
+static DWORD g_lastAttach;
+
 static void Attach() {
+    g_lastAttach = GetTickCount();
     DestroyScreens();
+    ReleaseLostDevice();
     HWND worker = FindWorkerW();
     if (!worker) { Log(L"No se encontro WorkerW"); return; }
     if (!g_hapChecked) {
@@ -690,9 +729,21 @@ static void ApplyState() {
 }
 
 static void Check() {
-    bool lost = g_screens.empty();
-    for (Screen* s : g_screens) if (!IsWindow(s->wnd)) lost = true;
-    if (lost) { Log(L"Ventanas perdidas, reintentando"); Attach(); }
+    // Al cambiar de escritorio virtual (y a veces con Win+D) Explorer destruye, oculta o
+    // reemplaza la capa del fondo: si las ventanas ya no estan en la capa visible, o un
+    // monitor no puede presentar, se rehace todo (como mucho cada 2 s).
+    // Los casos que podrian repetirse sin arreglarse (Present falla, capa oculta) esperan 2 s.
+    const wchar_t* why = g_screens.empty() ? L"sin monitores" : nullptr;
+    bool throttle = false;
+    HWND worker = why ? nullptr : CurrentWorkerW();
+    for (Screen* s : g_screens) {
+        if (why) break;
+        if (!IsWindow(s->wnd)) why = L"ventana destruida";
+        else if (worker && GetParent(s->wnd) != worker) why = L"capa del fondo reemplazada";
+        else if (s->failed) { why = L"Present falla"; throttle = true; }
+        else if (!IsWindowVisible(s->wnd)) { why = L"capa del fondo oculta"; throttle = true; }
+    }
+    if (why && (!throttle || GetTickCount() - g_lastAttach >= 2000)) { Log(L"Reenganchando: %ls", why); Attach(); }
     g_fullscreenApp = !g_noAutoPause && FullscreenAppRunning();
     for (Screen* s : g_screens) {
         HWND cover = g_noAutoPause ? nullptr : CoveringWindow(s);
@@ -857,8 +908,33 @@ static void InjectTaskbar() {
 
 static void CALLBACK ForegroundHook(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) { ApplyTaskbar(); }
 
+// Explorer crea o destruye la capa del fondo (cambio de escritorio virtual): revisar ya,
+// no al proximo tick de 1 s, para que casi no se vea el fondo estatico.
+static HWINEVENTHOOK g_desktopHook;
+static void CALLBACK DesktopHook(HWINEVENTHOOK, DWORD ev, HWND h, LONG obj, LONG child, DWORD, DWORD) {
+    if (obj != OBJID_WINDOW || child != CHILDID_SELF || !h) return;
+    bool relevant = false;
+    if (ev == EVENT_OBJECT_SHOW) {
+        wchar_t cls[16] = {};
+        GetClassNameW(h, cls, 16);
+        relevant = !wcscmp(cls, L"WorkerW");
+    } else {
+        for (Screen* s : g_screens) if (GetParent(s->wnd) == h) relevant = true;
+    }
+    if (relevant) SetTimer(g_msgWnd, IDT_QUICK, 30, nullptr);
+}
+
+static void HookDesktop() {
+    if (g_desktopHook) { UnhookWinEvent(g_desktopHook); g_desktopHook = nullptr; }
+    DWORD pid = 0;
+    HWND progman = FindWindowW(L"Progman", nullptr);
+    if (progman) GetWindowThreadProcessId(progman, &pid);
+    if (pid) g_desktopHook = SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_SHOW, nullptr, DesktopHook, pid, 0, WINEVENT_OUTOFCONTEXT);
+}
+
 static std::wstring IniPath() { return g_exeDir + L"\\HapWallpaper.ini"; }
 // -1 = sin eleccion guardada (automatico), 0 = apagada, 1 = prendida.
+static bool StaticFrameEnabled() { return GetPrivateProfileIntW(L"Settings", L"StaticFrame", 1, IniPath().c_str()) != 0; }
 static int LoadTaskbarSetting() { return (int)GetPrivateProfileIntW(L"Settings", L"TransparentTaskbar", -1, IniPath().c_str()); }
 static void SaveTaskbarSetting(bool on) {
     WritePrivateProfileStringW(L"Settings", L"TransparentTaskbar", on ? L"1" : L"0", IniPath().c_str());
@@ -967,7 +1043,10 @@ static void AddTray() {
 static void ShowMenu() {
     HMENU m = CreatePopupMenu();
     AppendMenuW(m, MF_STRING, IDM_TOGGLE, g_userPaused ? L"Resume" : L"Pause");
+    AppendMenuW(m, MF_STRING | (g_noAutoPause ? 0 : MF_CHECKED), IDM_AUTOPAUSE, L"Pause behind maximized or fullscreen windows");
     AppendMenuW(m, MF_STRING | (g_taskbar && !g_tbOwner ? MF_CHECKED : 0), IDM_TASKBAR, L"Transparent taskbar");
+    AppendMenuW(m, MF_STRING | (StaticFrameEnabled() ? MF_CHECKED : 0) | (g_hapReady ? 0 : MF_GRAYED), IDM_STATICFRAME,
+                L"Use first video frame as Windows wallpaper");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, IDM_EXIT, L"Exit");
     POINT p; GetCursorPos(&p);
@@ -976,24 +1055,178 @@ static void ShowMenu() {
     DestroyMenu(m);
 }
 
+// ------------------------------------------- Fondo estatico = primer cuadro del video
+// Al cambiar de escritorio virtual Explorer rehace la capa del fondo y, hasta que el video
+// se vuelve a enganchar, se ve el fondo estatico de Windows. Con HAP se pone como fondo
+// estatico el primer cuadro (el video recomienza desde ese cuadro al reengancharse), asi
+// el cambio casi no se nota. El fondo original se guarda en el .ini y se restaura al salir
+// desde la bandeja; si el programa se corta, queda guardado y se restaura en la proxima salida.
+static bool g_staticSet;
+static std::wstring FramePath() { return g_exeDir + L"\\HapWallpaper_frame.bmp"; }
+
+// Decodifica el primer cuadro BC1 en la CPU y lo escribe como BMP de 24 bits.
+static bool WriteFirstFrameBmp(const std::wstring& path) {
+    HANDLE f = CreateFileW(g_hapPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    std::vector<BYTE> bc(g_hapPayload);
+    bool ok = ReadAt(f, g_hapHdr, bc.data(), g_hapPayload);
+    CloseHandle(f);
+    if (!ok) return false;
+    const UINT w = g_hapW, h = g_hapH, row = w * 3; // w es multiplo de 4: filas ya alineadas
+    std::vector<BYTE> px((size_t)row * h);
+    for (UINT by = 0; by < h / 4; by++)
+        for (UINT bx = 0; bx < w / 4; bx++) {
+            const BYTE* b = &bc[((size_t)by * (w / 4) + bx) * 8];
+            UINT c[2] = { (UINT)(b[0] | b[1] << 8), (UINT)(b[2] | b[3] << 8) };
+            UINT idx = b[4] | b[5] << 8 | b[6] << 16 | (UINT)b[7] << 24;
+            int pal[4][3]; // B, G, R
+            for (int k = 0; k < 2; k++) {
+                pal[k][0] = (c[k] & 31) * 255 / 31;
+                pal[k][1] = ((c[k] >> 5) & 63) * 255 / 63;
+                pal[k][2] = (c[k] >> 11) * 255 / 31;
+            }
+            for (int ch = 0; ch < 3; ch++) {
+                if (c[0] > c[1]) { pal[2][ch] = (2 * pal[0][ch] + pal[1][ch]) / 3; pal[3][ch] = (pal[0][ch] + 2 * pal[1][ch]) / 3; }
+                else { pal[2][ch] = (pal[0][ch] + pal[1][ch]) / 2; pal[3][ch] = 0; }
+            }
+            for (UINT py = 0; py < 4; py++)
+                for (UINT pxi = 0; pxi < 4; pxi++) {
+                    int i = (idx >> (2 * (py * 4 + pxi))) & 3;
+                    BYTE* d = &px[(size_t)(h - 1 - (by * 4 + py)) * row + (bx * 4 + pxi) * 3]; // BMP de abajo hacia arriba
+                    d[0] = (BYTE)pal[i][0]; d[1] = (BYTE)pal[i][1]; d[2] = (BYTE)pal[i][2];
+                }
+        }
+    BITMAPINFOHEADER bi = { sizeof(bi), (LONG)w, (LONG)h, 1, 24, BI_RGB, (DWORD)px.size(), 2835, 2835, 0, 0 };
+    BITMAPFILEHEADER fh = { 0x4D42, (DWORD)(sizeof(fh) + sizeof(bi) + px.size()), 0, 0, sizeof(fh) + sizeof(bi) };
+    HANDLE o = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (o == INVALID_HANDLE_VALUE) return false;
+    DWORD n;
+    ok = WriteFile(o, &fh, sizeof(fh), &n, nullptr) && WriteFile(o, &bi, sizeof(bi), &n, nullptr) &&
+         WriteFile(o, px.data(), (DWORD)px.size(), &n, nullptr) && n == px.size();
+    CloseHandle(o);
+    return ok;
+}
+
+static IDesktopWallpaper* OpenDesktopWallpaper() {
+    IDesktopWallpaper* dw = nullptr;
+    CoCreateInstance(CLSID_DesktopWallpaper, nullptr, CLSCTX_ALL, IID_IDesktopWallpaper, (void**)&dw);
+    return dw;
+}
+
+static void SetStaticFrame() {
+    if (!g_hapReady || !StaticFrameEnabled()) return;
+    IDesktopWallpaper* dw = OpenDesktopWallpaper();
+    if (!dw) { Log(L"IDesktopWallpaper no disponible"); return; }
+    DESKTOP_SLIDESHOW_STATE st = (DESKTOP_SLIDESHOW_STATE)0;
+    if (SUCCEEDED(dw->GetStatus(&st)) && (st & DSS_SLIDESHOW)) { Log(L"Presentacion de fondos activa: no se cambia el fondo estatico"); dw->Release(); return; }
+    std::wstring ini = IniPath(), frame = FramePath();
+    // Si ya hay un fondo guardado (el programa se corto antes de restaurarlo), se conserva.
+    if (GetPrivateProfileIntW(L"SavedWallpaper", L"Count", 0, ini.c_str()) == 0) {
+        UINT n = 0;
+        dw->GetMonitorDevicePathCount(&n);
+        UINT saved = 0;
+        for (UINT i = 0; i < n; i++) {
+            LPWSTR id = nullptr, wp = nullptr;
+            if (SUCCEEDED(dw->GetMonitorDevicePathAt(i, &id)) && SUCCEEDED(dw->GetWallpaper(id, &wp))) {
+                // Si Windows solo tiene su copia interna (TranscodedWallpaper), se guarda una
+                // copia aparte: al poner el cuadro, Windows la reemplaza.
+                std::wstring path = wp ? wp : L"";
+                size_t tl = wcslen(L"\\TranscodedWallpaper");
+                if (path.size() > tl && !_wcsicmp(path.c_str() + path.size() - tl, L"\\TranscodedWallpaper")) {
+                    std::wstring copy = g_exeDir + L"\\HapWallpaper_original" + std::to_wstring(saved) + L".jpg";
+                    if (CopyFileW(path.c_str(), copy.c_str(), FALSE)) path = copy;
+                }
+                CoTaskMemFree(wp); wp = nullptr;
+                wchar_t k[16];
+                swprintf(k, 16, L"Id%u", saved); WritePrivateProfileStringW(L"SavedWallpaper", k, id, ini.c_str());
+                swprintf(k, 16, L"Path%u", saved); WritePrivateProfileStringW(L"SavedWallpaper", k, path.c_str(), ini.c_str());
+                saved++;
+            }
+            CoTaskMemFree(id); CoTaskMemFree(wp);
+        }
+        DESKTOP_WALLPAPER_POSITION pos = DWPOS_FILL;
+        dw->GetPosition(&pos);
+        wchar_t v[16];
+        swprintf(v, 16, L"%d", (int)pos); WritePrivateProfileStringW(L"SavedWallpaper", L"Position", v, ini.c_str());
+        swprintf(v, 16, L"%u", saved); WritePrivateProfileStringW(L"SavedWallpaper", L"Count", v, ini.c_str());
+    }
+    if (WriteFirstFrameBmp(frame)) {
+        dw->SetPosition(DWPOS_FILL); // igual que el video: llena la pantalla recortando al centro
+        HRESULT hr = dw->SetWallpaper(nullptr, frame.c_str());
+        g_staticSet = SUCCEEDED(hr);
+        Log(L"Fondo estatico = primer cuadro: 0x%08X", (unsigned)hr);
+    }
+    dw->Release();
+}
+
+// Vuelve al fondo guardado, en los monitores que siguen mostrando el primer cuadro (si el
+// usuario eligio otro fondo mientras tanto, se respeta).
+static void RestoreStaticWallpaper() {
+    std::wstring ini = IniPath(), frame = FramePath();
+    UINT count = GetPrivateProfileIntW(L"SavedWallpaper", L"Count", 0, ini.c_str());
+    if (!count) return;
+    IDesktopWallpaper* dw = OpenDesktopWallpaper();
+    if (!dw) return;
+    bool any = false;
+    for (UINT i = 0; i < count; i++) {
+        wchar_t k[16], id[512] = {}, wp[MAX_PATH * 2] = {};
+        swprintf(k, 16, L"Id%u", i); GetPrivateProfileStringW(L"SavedWallpaper", k, L"", id, 512, ini.c_str());
+        swprintf(k, 16, L"Path%u", i); GetPrivateProfileStringW(L"SavedWallpaper", k, L"", wp, MAX_PATH * 2, ini.c_str());
+        LPWSTR cur = nullptr;
+        if (*id && SUCCEEDED(dw->GetWallpaper(id, &cur)) && cur && !_wcsicmp(cur, frame.c_str())) {
+            dw->SetWallpaper(id, wp);
+            any = true;
+        }
+        CoTaskMemFree(cur);
+    }
+    if (any) dw->SetPosition((DESKTOP_WALLPAPER_POSITION)GetPrivateProfileIntW(L"SavedWallpaper", L"Position", DWPOS_FILL, ini.c_str()));
+    dw->Release();
+    WritePrivateProfileStringW(L"SavedWallpaper", nullptr, nullptr, ini.c_str());
+    Log(L"Fondo estatico original restaurado");
+}
+
+static void ToggleStaticFrame() {
+    bool on = !StaticFrameEnabled();
+    WritePrivateProfileStringW(L"Settings", L"StaticFrame", on ? L"1" : L"0", IniPath().c_str());
+    if (on) SetStaticFrame();
+    else { RestoreStaticWallpaper(); g_staticSet = false; }
+}
+
 static void RestoreDesktop() {
+    if (g_staticSet) { RestoreStaticWallpaper(); return; }
     // Vuelve a aplicar el fondo estatico actual para que Explorer repinte la capa.
     wchar_t wp[MAX_PATH] = {};
     SystemParametersInfoW(SPI_GETDESKWALLPAPER, MAX_PATH, wp, 0);
     SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, wp, SPIF_SENDCHANGE);
 }
 
+// Reanudar a mano tambien rehace las ventanas del fondo: si algo quedo trabado que Check()
+// no detecto, pausar y reanudar lo arregla sin cerrar el programa.
+static void TogglePause() {
+    g_userPaused = !g_userPaused;
+    if (!g_userPaused) { Log(L"Reanudado a mano, reenganchando"); Attach(); }
+    ApplyState();
+}
+
 static LRESULT CALLBACK MsgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
-    if (msg == WM_TASKBARCREATED && WM_TASKBARCREATED) { Log(L"Explorer reiniciado"); AddTray(); Attach(); ApplyState(); return 0; }
+    if (msg == WM_TASKBARCREATED && WM_TASKBARCREATED) { Log(L"Explorer reiniciado"); AddTray(); Attach(); HookDesktop(); ApplyState(); return 0; }
     switch (msg) {
-    case WM_TIMER: Check(); InjectTaskbar(); ApplyTaskbar(); return 0;
+    case WM_TIMER:
+        if (wp == IDT_QUICK) { KillTimer(h, IDT_QUICK); Check(); return 0; }
+        Check(); InjectTaskbar(); ApplyTaskbar(); return 0;
     case WM_TRAY:
         if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) ShowMenu();
-        else if (LOWORD(lp) == WM_LBUTTONDBLCLK) { g_userPaused = !g_userPaused; ApplyState(); }
+        else if (LOWORD(lp) == WM_LBUTTONDBLCLK) TogglePause();
         return 0;
     case WM_COMMAND:
-        if (LOWORD(wp) == IDM_TOGGLE) { g_userPaused = !g_userPaused; ApplyState(); }
+        if (LOWORD(wp) == IDM_TOGGLE) TogglePause();
         else if (LOWORD(wp) == IDM_TASKBAR) ToggleTaskbar();
+        else if (LOWORD(wp) == IDM_STATICFRAME) ToggleStaticFrame();
+        else if (LOWORD(wp) == IDM_AUTOPAUSE) {
+            g_noAutoPause = !g_noAutoPause;
+            WritePrivateProfileStringW(L"Settings", L"AutoPause", g_noAutoPause ? L"0" : L"1", IniPath().c_str());
+            Check();
+        }
         else if (LOWORD(wp) == IDM_EXIT) DestroyWindow(h);
         return 0;
     case WM_WTSSESSION_CHANGE:
@@ -1018,6 +1251,8 @@ static LRESULT CALLBACK MsgProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         KillTimer(h, IDT_CHECK);
         if (g_tbHook) UnhookWindowsHookEx(g_tbHook);
         if (g_fgHook) UnhookWinEvent(g_fgHook);
+        if (g_desktopHook) UnhookWinEvent(g_desktopHook);
+        KillTimer(h, IDT_QUICK);
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
         DestroyScreens();
         RestoreDesktop();
@@ -1055,6 +1290,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     int tbSetting = LoadTaskbarSetting();
     g_taskbarAuto = tbSetting < 0;
     g_taskbar = tbSetting != 0;
+    g_noAutoPause = GetPrivateProfileIntW(L"Settings", L"AutoPause", 1, IniPath().c_str()) == 0;
     int argc; wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     for (int i = 1; i < argc; i++) {
         if (!wcscmp(argv[i], L"--debug")) g_debug = true;
@@ -1117,6 +1353,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     // El hook es barato y ApplyTaskbar no hace nada con la opcion apagada; asi sirve si se activa despues.
     g_fgHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, ForegroundHook, 0, 0,
                                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+    HookDesktop();
+    SetStaticFrame();
     SetTimer(g_msgWnd, IDT_CHECK, 1000, nullptr);
 
     MSG m;
